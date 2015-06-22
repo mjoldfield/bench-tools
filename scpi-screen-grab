@@ -1,0 +1,179 @@
+#! /usr/bin/perl
+
+#
+# scpi-screen-grab
+#
+# Copyright (c) 2015 Martin Oldfield <bench-tools@mjoldfield.com>
+#
+
+use strict;
+use warnings;
+
+package MSO;
+
+use base qw(IO::Socket::INET);
+
+sub new
+  {
+    my ($c, @args) = @_;
+    return $c->SUPER::new(PeerPort => 5025, @args);
+  }
+
+sub get_ieee_binary_block
+  {
+    my $io = shift;
+    
+    # We get an IEEE block in response. See e.g.
+    # http://na.support.keysight.com/pna/help/latest/Programming/Learning_about_GPIB/Getting_Data_from_the_Analyzer.htm#block
+    my $header;
+    read($io, $header, 2);
+  
+    # length of length
+    my ($m) = ($header =~ /^#(\d)$/)
+	or die "Unable to parse header A: $header, ";
+
+    # length of data
+    read($io, $header, $m);
+    my ($n) = ($header =~ /^(\d+)$/)
+	or die "Unable to parse header B: $header, ";
+
+    # data
+    my $data;
+    read($io, $data, $n);
+
+    # end-of-line
+    $io->getline;
+
+    return $data;
+  }
+  
+package main;
+
+use Pod::Usage;
+use Getopt::Long;
+
+my %Opt;
+GetOptions(\%Opt, "help!", "info!");
+  
+pod2usage(-verbose => 2)
+    if $Opt{help} || $Opt{info};
+
+my $addr = shift || 'mso.local';
+my $file = shift || 'mso.png';
+
+my $mso = MSO->new(PeerAddr => $addr)
+  or die "Unable to open MSO connection, ";
+
+$mso->print("*IDN?\n");
+print "Connected to:\n", $mso->getline;
+
+$mso->print("DISP:DATA?\n");
+my $data = $mso->get_ieee_binary_block;
+    
+open(my $fh, '>', $file);
+print {$fh} $data;
+
+__END__
+  
+=head1 NAME
+ 
+scpi-screen-grab - Grab the screen from an SCPI device
+ 
+=head1 USAGE
+
+    $ scpi-screen-grab mso.local mso.png
+
+    $ scpi-screen-grab mso.local
+
+    $ scpi-screen-grab
+
+    
+=head1 DESCRIPTION
+
+Grab the screen from a network attached device
+using the DISP:DATA? SCPI command
+
+It has been tested with the Agilent MSO-X 3034A scope
+but might work more generally
+
+=head1 OPTIONS
+
+You can specify two positional arguments: address and filename.
+
+Named arguments also exist:
+
+=over
+
+=item --help, --info
+
+Display this page.
+
+=back
+
+=head1 DEPENDENCIES
+
+None for the core code, C<Pod::Usage> and C<Getopt::Long> for
+the the friendly fluff.
+
+=head1 ACKNOWLEDGEMENTS
+
+The 3000 X-Series programming guide explained what needed to be
+done. You can get that from 
+L<http://www.keysight.com/upload/cmc_upload/All/3000_series_prog_guide.pdf>
+
+Key features:
+
+=over
+
+=item Reading Definite-Length Block Query Response Data
+
+Shows how the binary image data are returned.
+
+=item :DISPlay:DATA
+
+Shows how to request the image.
+
+=item *IDN (Identification Number)
+
+Shows how to identify the instrument.
+
+=item Telnet Sockets
+
+Describes the network interface.
+
+=back
+ 
+=head1 BUGS AND LIMITATIONS
+
+This program is a quick hack: do not rely on it for critical
+appliations.
+
+Please report problems to the author.
+
+Patches are welcome.
+
+=head1 WEBSITE
+
+Available from GitHub L<https://github.com/mjoldfield/bench-tools>
+ 
+=head1 AUTHOR
+
+M J Oldfield, bench-tools@mjoldfied.com
+
+=head1 LICENCE AND COPYRIGHT
+ 
+Copyright (c) 2015, M J Oldfield
+ 
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 2 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
+    
