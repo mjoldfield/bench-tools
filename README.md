@@ -10,7 +10,7 @@ are common.
 
 However, at the end of the day in many cases everything boils down to
 exchanging messages in a friendly and well-documented format, so for
-_casual use_ it might be easier to just write some Perl (or python
+**casual use** it might be easier to just write some Perl (or python
 if you're that way inclined).
 
 
