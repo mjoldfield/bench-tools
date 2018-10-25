@@ -12,6 +12,7 @@ use warnings;
 package MSO;
 
 use base qw(IO::Socket::INET);
+use YAML;
 
 sub new
   {
@@ -85,6 +86,54 @@ sub timebase_set_time
     $mso->run_cmd(sprintf(':TIM:RANG %.4g', $t));
   }
 
+sub measurements_init
+  {
+    my $mso = shift;
+
+    $mso->run_cmd(':MEAS:CLEAR');
+    
+    $mso->run_cmd(':MEAS:FREQ CHAN1');
+    $mso->run_cmd(':MEAS:VAMP CHAN1');
+    $mso->run_cmd(':MEAS:VAMP CHAN2');
+    $mso->run_cmd(':MEAS:PHAS CHAN1,CHAN2');
+
+    $mso->run_cmd(':MEAS:STAT ON');
+  }
+
+sub measurements_clear_stats
+  {
+    my $mso = shift;
+
+    $mso->run_cmd(':MEAS:STAT:RES');
+  }
+  
+sub measurements_read
+  {
+    my $mso = shift;
+
+    my @names = qw(field current min max mean stddev count);
+
+    
+    my $r = $mso->run_cmd(':MEAS:RES?',1);
+
+    my @f = split(/,/, $r);
+
+    my %all;
+    while(@f)
+      {
+	my %d;
+	foreach my $name (@names)
+	  {
+	    $d{$name} = shift @f;
+	  }
+
+	my $field = delete $d{field};
+	$all{$field} = \%d;
+      }
+
+    return \%all;
+  }
+    
 sub get_ieee_binary_block
   {
     my $io = shift;
@@ -129,26 +178,55 @@ my $addr = shift || 'mso.local';
 my $mso = MSO->new(PeerAddr => $addr)
   or die "Unable to open MSO connection, ";
 
-my $idn = $mso->run_cmd('*IDN?', 1);
-print "I: $idn\n";
+$mso->run_cmd('*IDN?', 1);
 
 $mso->init;
 
-foreach my $f (10, 100, 1000, 10000)
-    {
-      $mso->wavegen_set_freq($f);
-
-      my $n_cycles = 3;
-      my $t = $n_cycles / $f;
-      $mso->timebase_set_time($t);
-
-      sleep(10);
-    }
+my @d;
+my $n_per_decade = 10;
+my $ratio = 10.0 ** (1/$n_per_decade);  
 
   
+foreach my $fbase (10, 100, 1000, 10000)
+  {
+    my $f = $fbase;
+    foreach my $i (1..$n_per_decade)
+      {
+	push(@d, test_freq($mso, $f));
+	$f *= $ratio;
+      }
+  }
 
+open(my $fh, '>', 'resp.dat');
+foreach my $d (@d)
+  {
+    printf {$fh} "%f %f %f\n", @$d;
+  }
 
-  
+sub test_freq
+  {
+    my ($mso, $f) = @_;
+    
+    $mso->wavegen_set_freq($f);
+
+    my $n_cycles = 3;
+    my $t = $n_cycles / $f;
+    $mso->timebase_set_time($t);
+    
+    sleep(1);
+    
+    $mso->measurements_clear_stats;
+    
+    sleep(2);
+    
+    my $d = $mso->measurements_read;
+    
+    my $phase = $d->{'Phase(1-2)'}->{mean};
+    my $amp   = $d->{'Pk-Pk(2)'}->{mean} / $d->{'Pk-Pk(1)'}->{mean};
+    
+   return [ $f, $amp, $phase ];
+  }
+
   
 __END__
   
