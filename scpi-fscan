@@ -90,6 +90,8 @@ sub measurements_init
   {
     my $mso = shift;
 
+    $mso->run_cmd(':ACQ:TYPE AVER');
+    
     $mso->run_cmd(':MEAS:CLEAR');
     
     $mso->run_cmd(':MEAS:FREQ CHAN1');
