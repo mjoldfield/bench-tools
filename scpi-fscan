@@ -46,6 +46,7 @@ sub init
 
     $mso->wavegen_init;
     $mso->timebase_init;
+    $mso->measurements_init;
   }
 
 sub wavegen_init
@@ -95,9 +96,9 @@ sub measurements_init
     $mso->run_cmd(':MEAS:CLEAR');
     
     $mso->run_cmd(':MEAS:FREQ CHAN1');
-    $mso->run_cmd(':MEAS:VAMP CHAN1');
-    $mso->run_cmd(':MEAS:VAMP CHAN2');
-    $mso->run_cmd(':MEAS:PHAS CHAN1,CHAN2');
+    $mso->run_cmd(':MEAS:VRAT CYCL,CHAN2,CHAN1');
+    $mso->run_cmd(':MEAS:PHAS CHAN2,CHAN1');
+    $mso->run_cmd(':MEAS:VPP CHAN2');
 
     $mso->run_cmd(':MEAS:STAT ON');
   }
@@ -223,8 +224,8 @@ sub test_freq
     
     my $d = $mso->measurements_read;
     
-    my $phase = $d->{'Phase(1-2)'}->{mean};
-    my $amp   = $d->{'Pk-Pk(2)'}->{mean} / $d->{'Pk-Pk(1)'}->{mean};
+    my $phase = $d->{'Phase(2-1)'}->{mean};
+    my $amp   = $d->{'Ratio - N Cycles(2-1)'}->{mean};
     
    return [ $f, $amp, $phase ];
   }
