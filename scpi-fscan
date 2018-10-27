@@ -1,9 +1,9 @@
 #! /usr/bin/perl
 
 #
-# scpi-screen-grab
+# scpi-fscan
 #
-# Copyright (c) 2015 Martin Oldfield <bench-tools@mjoldfield.com>
+# Copyright (c) 2018 Martin Oldfield <bench-tools@mjoldfield.com>
 #
 
 use strict;
@@ -11,15 +11,34 @@ use warnings;
 
 package MSO;
 
-use base qw(IO::Socket::INET);
+use IO::Socket::INET;
+
 use YAML;
 
 sub new
   {
     my ($c, @args) = @_;
-    return $c->SUPER::new(PeerPort => 5025, @args);
+
+    my $self = bless {}, $c;
+
+    my $sock = IO::Socket::INET->new(PeerPort => 5025, @args);
+    $self->{socket} = $sock;
+
+    return $self;
   }
 
+sub print
+  {
+    my $s = shift;
+    $s->{socket}->print(@_);
+  }
+
+sub getline
+  {
+    my $s = shift;
+    $s->{socket}->getline;
+  }
+    
 sub run_cmd
   {
     my ($s, $cmd, $resp) = @_;
@@ -44,6 +63,9 @@ sub init
   {
     my $mso = shift;
 
+    $mso->channel_init(1);
+    $mso->channel_init(2);
+    
     $mso->wavegen_init;
     $mso->timebase_init;
     $mso->measurements_init;
@@ -90,15 +112,16 @@ sub timebase_set_time
 sub measurements_init
   {
     my $mso = shift;
-
+    
     $mso->run_cmd(':ACQ:TYPE AVER');
+    $mso->run_cmd(':ACQ:COUN 256');
     
     $mso->run_cmd(':MEAS:CLEAR');
     
-    $mso->run_cmd(':MEAS:FREQ CHAN1');
+    $mso->run_cmd(':MEAS:VPP CHAN1');
+    $mso->run_cmd(':MEAS:VPP CHAN2');
     $mso->run_cmd(':MEAS:VRAT CYCL,CHAN2,CHAN1');
     $mso->run_cmd(':MEAS:PHAS CHAN2,CHAN1');
-    $mso->run_cmd(':MEAS:VPP CHAN2');
 
     $mso->run_cmd(':MEAS:STAT ON');
   }
@@ -108,6 +131,72 @@ sub measurements_clear_stats
     my $mso = shift;
 
     $mso->run_cmd(':MEAS:STAT:RES');
+  }
+
+sub read_all
+  {
+    my ($mso, $t) = @_;
+
+    $t //= 2.0; # default accumulation time in seconds
+
+    # allowed full scale ranges i.e. 8x volts per div
+    my @ranges = map { ($_ * 8, $_ * 16, $_ * 40) } (0.01, 0.1, 1.0);
+
+    my %tried;
+    while(1)
+      {
+	my $ok = 1; # optimism!
+    
+	$mso->measurements_clear_stats;
+    
+	sleep($t);
+	
+	my $d = $mso->measurements_read;
+
+	# Look at all the channels where we are measuring the Pk-Pk
+	# voltage and adjust the y gain on the scope sensibly
+	my @channels = map { /^Pk-Pk\((\d+)\)$/ } keys %$d;
+
+      CHAN:
+	foreach my $chan (sort @channels)
+	  {
+	    my $k = "Pk-Pk($chan)";
+	    my $v = $d->{$k}->{mean};
+
+	    my $range = sprintf "%f", $mso->run_cmd(":CHAN$chan:RANG?", 1);
+	    $d->{$k}->{range} = $range;
+
+	    # if the range is OK don't tweak it: this also stops the scope hunting
+	    # between two resonable alternatives
+	    next CHAN if $v > 0.25 * $range && $v < $range;
+
+	    # new range should be the smallest which puts the trace on
+	    # less than 75% of the screen
+	    my ($new_range) = grep { 0.75 * $_ > $v } @ranges;
+
+	    # if we don't have $new_range here, it means the signal is large
+	    # either because we are feeding e.g. 100V to the scope, or we've
+	    # got the overload condn => V reported as 9.9E37
+	    #
+	    # set range to maxiumum and hope for the best
+	    #
+	    $new_range //= $ranges[-1];
+
+	    # if the last reading wasn't optimal, set the range and flag
+	    # that we need to redo the measurements
+	    if (abs($range - $new_range) / $new_range > 1e-6)
+	      {
+		$mso->run_cmd(":CHAN$chan:RANG $new_range");
+		undef $ok;
+	      }
+	  }
+
+	if ($ok)
+	  {
+	    return $d;
+	  }
+      }
+	      
   }
   
 sub measurements_read
@@ -135,6 +224,18 @@ sub measurements_read
       }
 
     return \%all;
+  }
+
+sub channel_init
+  {
+    my ($mso, $n) = @_;
+
+    $mso->run_cmd(":CHAN$n:COUP AC");
+    $mso->run_cmd(":CHAN$n:BWL ON");
+    $mso->run_cmd(":CHAN$n:DISP 1");
+
+    $mso->run_cmd(":CHAN$n:RANG 1.6E+0V");
+    $mso->run_cmd(":CHAN$n:OFFS 0.0E+0V");    
   }
     
 sub get_ieee_binary_block
@@ -170,6 +271,8 @@ package main;
 use Pod::Usage;
 use Getopt::Long;
 
+$| = 1;
+  
 my %Opt;
 GetOptions(\%Opt, "help!", "info!");
   
@@ -177,6 +280,7 @@ pod2usage(-verbose => 2)
     if $Opt{help} || $Opt{info};
 
 my $addr = shift || 'mso.local';
+my $file = shift || 'resp.dat';
 
 my $mso = MSO->new(PeerAddr => $addr)
   or die "Unable to open MSO connection, ";
@@ -185,22 +289,27 @@ $mso->run_cmd('*IDN?', 1);
 
 $mso->init;
 
-my @d;
 my $n_per_decade = 10;
 my $ratio = 10.0 ** (1/$n_per_decade);  
 
-  
+my @fs;  
 foreach my $fbase (10, 100, 1000, 10000)
   {
     my $f = $fbase;
     foreach my $i (1..$n_per_decade)
       {
-	push(@d, test_freq($mso, $f));
+	push(@fs, $f);
 	$f *= $ratio;
       }
   }
 
-open(my $fh, '>', 'resp.dat');
+my @d;
+foreach my $f (@fs, reverse @fs)
+  {
+    push(@d, test_freq($mso, $f));
+  }
+  
+open(my $fh, '>', $file);
 foreach my $d (@d)
   {
     printf {$fh} "%f %f %f\n", @$d;
@@ -215,14 +324,14 @@ sub test_freq
     my $n_cycles = 3;
     my $t = $n_cycles / $f;
     $mso->timebase_set_time($t);
-    
+
+    # Allow some time for circuit to settle: this doesn't seem
+    # critical
     sleep(1);
-    
-    $mso->measurements_clear_stats;
-    
-    sleep(2);
-    
-    my $d = $mso->measurements_read;
+        
+    # the time here sets the integration time for the stats
+    # 0.1s is too small
+    my $d = $mso->read_all(1);
     
     my $phase = $d->{'Phase(2-1)'}->{mean};
     my $amp   = $d->{'Ratio - N Cycles(2-1)'}->{mean};
@@ -235,24 +344,61 @@ __END__
   
 =head1 NAME
  
-scpi-screen-grab - Grab the screen from an SCPI device
+scpi-fscan - Measure a frequency response using a SCPI scope
  
 =head1 USAGE
 
-    $ scpi-screen-grab mso.local mso.png
+    $ scpi-fscan mso.local resp.dat
 
-    $ scpi-screen-grab mso.local
+    $ scpi-fscan mso.local
 
-    $ scpi-screen-grab
+    $ scpi-fscan
 
     
 =head1 DESCRIPTION
 
-Grab the screen from a network attached device
-using the DISP:DATA? SCPI command
+Measure the frequency response of an external circuit.
 
 It has been tested with the Agilent MSO-X 3034A scope
 but might work more generally
+
+We use the Wavegen function of the scope to generate
+a sine wave, then measure the difference in phase and
+amplitude between CHAN1 and CHAN2.
+
+Normally you would connect the Wavegen output and CHAN1
+to the input of the circuit under test, and CHAN2 to its
+output.
+    
+The frequency is swept between 10Hz and nearly 100kHz, and
+unscientific pauses are included in the code both to allow
+any transients to abate and for data to be accumulated.
+    
+Both the timebase and the Y-scales are controlled by the
+program in the hope of capturing reasonable data. We
+change the acquisition mode to average over 256 events.    
+
+=head2 OUTPUT FORMAT
+
+Data are saved to a three-column, space-separated file. Each
+line contains:
+
+=over
+
+=item Frequency
+
+In Hertz.
+
+=item Magnitude
+
+Expressed as a power gain in dB i.e. -20.0 implies one hundredth
+of the power, or one tenth of the amplitude.
+
+=item Phase
+
+Expressed in degrees.
+
+=back
 
 =head1 OPTIONS
 
